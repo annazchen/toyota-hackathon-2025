@@ -1,28 +1,11 @@
 import pandas as pd
 import numpy as np
 import pathlib as Path
-import os
-import json
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #metadata
-TRACKS = {
-    "barber": {
-        "races": ["R1", "R2"],
-        "cars": {
-            "000": ["GR86-002-000"],
-            "78":  ["GR86-004-78"]
-        }
-    }
+TRACKS = None
 
-}
-
-#cars w telemetry
-target_cars = {
-    "000" : ['GR86-002-000'],
-    "78" : ['GR86-004-78']
-}
 
 #target lap params
 lap_cols = ['lap', 'vehicle_id', 'meta_time']
@@ -37,12 +20,50 @@ def read_file(path):
 
 #file loader
 def load_lap_files(track, race):
-    start = read_file(f"{track}_data/{track}/{race}_{track}_lap_start.csv")
-    end   = read_file(f"{track}_data/{track}/{race}_{track}_lap_end.csv")
+    start = read_file(f"raw/{track}/{race}/{track}_lap_start_{race}.csv")
+    end   = read_file(f"raw/{track}/{race}/{track}_lap_end_{race}.csv")
     return start, end
 
 def load_telemetry(track, race):
-    return read_file(f"{track}_data/{track}/{race}_{track}_telemetry_data.csv")
+    return read_file(f"raw/{track}/{race}/{track}_telemetry_{race}.csv")
+
+#auto-populate cars dict inside TRACKS
+def extract_cars_tel(track, race):
+    tel_path = f"raw/{track}/{race}/{track}_telemetry_{race}.csv"
+    tel = read_file(tel_path)
+
+    # get unique vehicle_id
+    unique_ids = tel['vehicle_id'].dropna().unique()
+
+    # convert to chassis (last 2 parts, e.g., GR86-002-2 → 002-2)
+    chassis_ids = {
+        vid.split('-')[-2] + "-" + vid.split('-')[-1]: vid
+        for vid in unique_ids
+    }
+
+    return chassis_ids
+
+#auto-build TRACKS
+def build_tracks_from_raw():
+    TRACKS_AUTO = {}
+
+    base = Path.Path("raw/")
+    tracks = [p.name for p in base.iterdir() if p.is_dir()]
+
+    for track in tracks:
+        races = [p.name for p in (base / track).iterdir() if p.is_dir()]
+        TRACKS_AUTO[track] = {"races": races, "cars": {}}
+
+        for race in races:
+            cars = extract_cars_tel(track, race)
+
+            # merge cars across races
+            for key, val in cars.items():
+                if key not in TRACKS_AUTO[track]["cars"]:
+                    TRACKS_AUTO[track]["cars"][key] = []
+                TRACKS_AUTO[track]["cars"][key].append(val)
+
+    return TRACKS_AUTO
 
 #convert to python-readable time
 def convert_time(file):
@@ -54,9 +75,9 @@ def sort_tel_meta_time(file : pd.DataFrame):
     return file_sorted
 
 #filters lap csv to 3 columns and by vehicle
-def lap_filter(file : pd.DataFrame, car_id : str):
+def lap_filter(file : pd.DataFrame, car_id : str, track_name : str):
     filtered_file = file[lap_cols]
-    by_car = filtered_file[filtered_file['vehicle_id'].isin(target_cars[car_id])].copy()
+    by_car = filtered_file[filtered_file['vehicle_id'].isin(TRACKS[track_name]["cars"][car_id])].copy()
     by_car['chassis'] = by_car['vehicle_id'].str.split('-').str[-2:].str.join('-')
     return by_car
 
@@ -72,10 +93,10 @@ def merge_laps(start : pd.DataFrame, end : pd.DataFrame):
     return laps
 
 #filter telemetry to tel_cols, filter by values in target_tel and car_id
-def tel_filter(tel_data : pd.DataFrame, car_id : str):
+def tel_filter(tel_data : pd.DataFrame, car_id : str, track_name : str):
     tel_filtered = tel_data[tel_cols]
     tel_filtered = tel_filtered[tel_filtered['telemetry_name'].isin(target_tel)]
-    tel_filtered = tel_filtered[tel_filtered['vehicle_id'].isin(target_cars[car_id])].copy()
+    tel_filtered = tel_filtered[tel_filtered['vehicle_id'].isin(TRACKS[track_name]["cars"][car_id])].copy()
     tel_filtered['chassis'] = tel_filtered['vehicle_id'].str.split('-').str[-2:].str.join('-')
     return tel_filtered
 
@@ -117,29 +138,32 @@ def process_track(track_name, track_cfg):
             print(f" → Car {car_id}")
 
             #filter laps and telemetry
-            laps_f = lap_filter(lap_start, car_id)
-            lape_f = lap_filter(lap_end, car_id)
+            laps_f = lap_filter(lap_start, car_id, track_name)
+            lape_f = lap_filter(lap_end, car_id, track_name)
             laps = merge_laps(laps_f, lape_f)
 
-            tel_f = tel_filter(tel, car_id)
+            tel_f = tel_filter(tel, car_id, track_name)
 
             #merge lap + telemetry
             merged = merge_laps_tel(laps, tel_f)
 
             #output filenames
             out_parquet = f"data/{track_name}_{race}_{car_id}.parquet"
-            out_csv     = f"data/{track_name}_{race}_{car_id}.csv"
+            #out_csv     = f"data/{track_name}_{race}_{car_id}.csv"
 
             #save
             merged.to_parquet(out_parquet, index=False)
-            merged.to_csv(out_csv, index=False)
+            #merged.to_csv(out_csv, index=False)
 
             print(f"   Saved: {out_parquet}")
 
 
 def main():
+   global TRACKS
+   TRACKS = build_tracks_from_raw()   
    for track_name, track_cfg in TRACKS.items():
         process_track(track_name, track_cfg)
+
 
 if __name__ == "__main__":
     main()
